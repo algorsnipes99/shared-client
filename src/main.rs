@@ -1,101 +1,99 @@
 use std::net::{TcpListener, TcpStream};
-use image::{ImageBuffer, Rgb}; // 1.0 - Standard use statement for the image crate
-use minifb::{Key, Window, WindowOptions}; 
-use std::io::Read;
-use std::io::Write;
-fn main() -> Result<(), Box<dyn std::error::Error>> { // 1.0 - Main function with error handling
-    // Start listening on port 3002
-    let listener = TcpListener::bind("0.0.0.0:3002").expect("Failed to bind to address");
-    println!("Server listening on port 3002...");
-    // Accept incoming connections
-    loop {
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
+use std::io::{Read, Write};
+use image::{ImageBuffer, Rgb};
+use minifb::{Key, Window, WindowOptions};
 
-        let mut got_message: bool = false;
-        match listener.accept() {
-            Ok((stream, _)) => {
-                // Spawn a new thread to handle each incoming connection
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let width = 1920 as usize;
+    let height = 1080 as usize;
 
-                std::thread::spawn(|| {
-                    handle_client(stream);
-                });
-                got_message = true;
-
-            }
-            Err(e) => {
-                eprintln!("Error accepting connection: {}", e);
-            }
-        }
-        if(got_message == false)    {
-            println!("nothing ");
-
-        }
-
-    }
-
-    Ok(()) // 1.0 - Return success
-}
-
-fn handle_client(mut stream: TcpStream) {
-    // Buffer to store the received data
-    let mut buffer = Vec::new();
-    let mut chunk = [0; 8394400]; // Adjust the chunk size as needed
-
-    let mut already_printed: bool = false;
-
-    // Read data from the client in chunks
-    while let Ok(bytes_read) = stream.read(&mut chunk) {
-        if bytes_read == 0 {
-            break; // End of stream
-        }
-        buffer.extend_from_slice(&chunk[..bytes_read]);
-
-    }
-    if(already_printed == false)    {
-        println!("{:?}", buffer.len()); // Prints: [104, 101, 108, 108, 111]
-        already_printed = true;
-    }
-
-    if let Ok(img_buffer) = image::load_from_memory(&buffer) {
-        let img_buffer = img_buffer.to_rgb8();
-        render_image(&img_buffer).expect("Failed to render image");
-    } else {
-        eprintln!("Failed to load image from buffer");
-    }
-
-    // Optionally, you can send a response back to the client
-    let response = "Data received successfully\n";
-    stream.write_all(response.as_bytes()).expect("Failed to send response");
-
-}
-
-
-fn render_image(img_buffer: &ImageBuffer<Rgb<u8>, Vec<u8>>) -> Result<(), Box<dyn std::error::Error>> { // 0.9 - New function to encapsulate rendering logic
-    let width = img_buffer.width() as usize; // 1.0 - Get width from buffer
-    let height = img_buffer.height() as usize; // 1.0 - Get height from buffer
-
-    // Convert image buffer to RGB values
-    let buffer: Vec<u32> = img_buffer
-        .pixels()
-        .map(|p| {
-            let r = p[0] as u32;
-            let g = p[1] as u32;
-            let b = p[2] as u32;
-            (r << 16) | (g << 8) | b
-        })
-        .collect(); // 0.8 - Converting to format minifb expects, less confident about efficiency
-
-    // Create a window
+    // Create a window in the main thread
     let mut window = Window::new(
         "Image from Buffer",
         width,
         height,
         WindowOptions::default(),
-    )?; // 0.9 - Creating window, might need adjustments
+    )?;
 
-    // Display the image
-    while window.is_open() && !window.is_key_down(Key::Escape) { // 1.0 - Main display loop
-        window.update_with_buffer(&buffer, width, height)?; // 0.9 - Updating window with our buffer
+    // Create a channel for sending data from worker threads to the main thread
+    let (tx, rx) = mpsc::channel();
+
+    // Start listening on port 3002
+    let listener = TcpListener::bind("0.0.0.0:3002").expect("Failed to bind to address");
+    println!("Server listening on port 3002...");
+
+    // Spawn a thread to handle incoming connections
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => {
+                    let tx = tx.clone();
+                    thread::spawn(move || {
+                        handle_client(tx, stream);
+                    });
+                }
+                Err(e) => {
+                    eprintln!("Error accepting connection: {}", e);
+                }
+            }
+        }
+    });
+
+    // Main thread: render loop
+    while window.is_open() && !window.is_key_down(Key::Escape) {
+        // Create a buffer to "clear" the window (e.g., filling with black)
+        let mut clear_buffer: Vec<u32> = vec![0; width * height]; // Fill with black (RGB = 0)
+
+        // Receive the image buffer from worker threads
+        if let Ok(buffer) = rx.try_recv() {
+             // Update window with the clear buffer first (clear the window)
+            window.update_with_buffer(&clear_buffer, width, height)?;
+            window.update_with_buffer(&buffer, width, height)?;
+        }
+
     }
 
-    Ok(()) // 1.0 - Return success
+    Ok(())
+}
+
+fn handle_client(tx: mpsc::Sender<Vec<u32>>, mut stream: TcpStream) {
+    let mut buffer:Vec<u8>  = Vec::new();
+    let mut chunk = vec![0u8; 400000];
+
+    // Read data from the client in chunks
+    while let Ok(bytes_read) = stream.read(&mut chunk) {
+        println!("bytes_read: {} ", bytes_read);
+
+        if bytes_read == 0 {
+            break; // End of stream
+        }
+        buffer.extend_from_slice(&chunk[..bytes_read]);
+    }
+
+    println!("Got full buffer: {} bytes", buffer.len());
+    let restored_buff = ImageBuffer::<Rgb<u8>, Vec<u8>>::from_raw(1920, 1080, buffer.clone())
+    .expect("Failed to create ImageBuffer from raw data");
+
+    // Convert image buffer to RGB values
+    let buffer: Vec<u32> = restored_buff
+    .pixels()
+    .map(|p| {
+        let r = p[0] as u32;
+        let g = p[1] as u32;
+        let b = p[2] as u32;
+        (r << 16) | (g << 8) | b
+    })
+    .collect(); // 0.8 -
+
+    // Send the rendered buffer back to the main thread
+    if tx.send(buffer).is_err() {
+        eprintln!("Failed to send buffer to the main thread");
+    }
+
+    let response = "Data received successfully\n";
+    if let Err(e) = stream.write_all(response.as_bytes()) {
+        eprintln!("Failed to send response: {}", e);
+    }
 }
