@@ -21,7 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (tx, rx) = mpsc::channel();
 
     // Start listening on port 3002
-    let listener = TcpListener::bind("0.0.0.0:3002").expect("Failed to bind to address");
+    let listener = TcpListener::bind("192.168.1.104:3002").expect("Failed to bind to address");
     println!("Server listening on port 3002...");
 
     // Spawn a thread to handle incoming connections
@@ -44,14 +44,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Main thread: render loop
     while window.is_open() && !window.is_key_down(Key::Escape) {
         // Create a buffer to "clear" the window (e.g., filling with black)
-        let mut clear_buffer: Vec<u32> = vec![0; width * height]; // Fill with black (RGB = 0)
+        // let mut clear_buffer: Vec<u32> = vec![0; width * height]; // Fill with black (RGB = 0)
+        // window.update_with_buffer(&clear_buffer, width, height)?;
 
         // Receive the image buffer from worker threads
         if let Ok(buffer) = rx.try_recv() {
              // Update window with the clear buffer first (clear the window)
-            window.update_with_buffer(&clear_buffer, width, height)?;
             window.update_with_buffer(&buffer, width, height)?;
         }
+        window.update();
 
     }
 
@@ -59,20 +60,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn handle_client(tx: mpsc::Sender<Vec<u32>>, mut stream: TcpStream) {
-    let mut buffer:Vec<u8>  = Vec::new();
-    let mut chunk = vec![0u8; 400000];
+    let estimated_size = 6220800; // Adjust this as needed based on your use case
+    let mut buffer: Vec<u8> = Vec::with_capacity(estimated_size);
+    let mut chunk = vec![0u8; 4000];
 
     // Read data from the client in chunks
     while let Ok(bytes_read) = stream.read(&mut chunk) {
-        println!("bytes_read: {} ", bytes_read);
+        // eprintln!("got chunk {}", bytes_read);
 
         if bytes_read == 0 {
             break; // End of stream
         }
         buffer.extend_from_slice(&chunk[..bytes_read]);
     }
+    eprintln!("got image  {}", buffer.len());
 
-    println!("Got full buffer: {} bytes", buffer.len());
     let restored_buff = ImageBuffer::<Rgb<u8>, Vec<u8>>::from_raw(1920, 1080, buffer.clone())
     .expect("Failed to create ImageBuffer from raw data");
 
